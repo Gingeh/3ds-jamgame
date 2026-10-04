@@ -6,24 +6,20 @@
 #include "cameraButton.h"
 
 // TODO LIST:
-// - reduce generator health when saboteur is in range
-// - detect when generator health is 0, mark as destroyed, play sound, flash screen, reduce remaining power
-// - ^ maybe also briefly show a "spark" on the top screen ignoring the spotlight darkness
-// - detect game overs (saboteur killed or power reduced to 0) and show a game over screen
-// - ^ generally figure out the gamestate loop
+// - maybe also briefly show a "spark" on the top screen ignoring the spotlight darkness
 // - playtest
 // - playtest
 // - playtest
 
 // lower is slower
-#define SLIDER_SMOOTHING 0.1f
-#define CIV_TURN_SPEED 0.025f
-#define CIV_MOVE_SPEED 1.0f
+#define SLIDER_SMOOTHING 0.05f
+#define CIV_TURN_SPEED 0.05f
+#define CIV_MOVE_SPEED 1.5f
 #define CIVILIAN_COUNT 50
 #define BOTTOM_ZOOM 1.5f
 #define GENERATOR_COUNT 5
 #define GENERATOR_TOP_MARGIN 25.0f
-#define SABO_RANGE 20.0f
+#define SABO_RANGE 40.0f
 #define FLASH_DURATION 20
 
 #define TOP_WIDTH  400
@@ -75,6 +71,12 @@ struct Sabateur {
     struct CivPosDir posDir;
 };
 
+enum GameStatus {
+    RUNNING,
+    SABOTEUR_CAUGHT,
+    POWER_DEPLETED,
+};
+
 // everybody loves global state!
 struct GameState {
     C3D_RenderTarget* top_target;
@@ -88,11 +90,12 @@ struct GameState {
     int remainingPower;
     int flashframes;
     struct Generator generators[GENERATOR_COUNT];
+    enum GameStatus status;
 };
 struct GameState gameState;
 
 float spotlight_radius() {
-    return gameState.remainingPower / (float)GENERATOR_COUNT * 100.0f;
+    return gameState.remainingPower / (float)GENERATOR_COUNT * 50.0f + 30.0f;
 }
 float spotlight_target_x() { return TOP_WIDTH * gameState.leftSlider; }
 float spotlight_target_y() { return TOP_HEIGHT * gameState.rightSlider; }
@@ -139,10 +142,9 @@ void init_global_state() {
         };
     }
 
-    gameState.top_target = C2D_CreateScreenTarget(GFX_TOP, GFX_LEFT);
-    gameState.bottom_target = C2D_CreateScreenTarget(GFX_BOTTOM, GFX_LEFT);
     gameState.remainingPower = GENERATOR_COUNT;
     gameState.flashframes = 0;
+    gameState.status = RUNNING;
 
     #define GENERATOR_OVERPREPARE 4
     struct Generator generator_candidates[GENERATOR_COUNT * GENERATOR_OVERPREPARE];
@@ -152,7 +154,7 @@ void init_global_state() {
             .x = rand() % (int)(TOP_WIDTH),
             .y = rand() % (int)(TOP_HEIGHT - GENERATOR_TOP_MARGIN) + GENERATOR_TOP_MARGIN,
             .destroyed = false,
-            .health = 0.2f,
+            .health = 1.0f,
         };
         min_distances[i] = INFINITY;
     }
@@ -234,6 +236,14 @@ enum ShouldExit tick() {
 
     if (hidKeysDown() & KEY_START) return EXIT_YES;
 
+    if (gameState.status != RUNNING) {
+        gameState.flashframes = 0;
+        if (hidKeysDown() & KEY_A) {
+            init_global_state();
+        }
+        return EXIT_NO;
+    }
+
     float leftSliderTarget, rightSliderTarget;
     get_slider_targets(&leftSliderTarget, &rightSliderTarget);
 
@@ -277,11 +287,15 @@ enum ShouldExit tick() {
                 civ->posDir.direction = atan2f(dy, dx);
             }
         }
-
-        //TODO: also splatter the saboteur and end the game
-
-        gameState.flashframes = FLASH_DURATION;
-        gameState.remainingPower--;
+        
+        float sabateur_dx = gameState.sabateur.posDir.x - target_x;
+        float sabateur_dy = gameState.sabateur.posDir.y - target_y;
+        if (sabateur_dx * sabateur_dx + sabateur_dy * sabateur_dy < spotlight_radius() * spotlight_radius()) {
+            gameState.status = SABOTEUR_CAUGHT;
+        } else {
+            gameState.flashframes = FLASH_DURATION;
+            gameState.remainingPower--;
+        }
     }
 
     for (int i = 0; i < CIVILIAN_COUNT; i++) {
@@ -302,9 +316,24 @@ enum ShouldExit tick() {
     gameState.lastDesiredDirection = sabateur_desired_direction;
     move_civilian_posdir(&gameState.sabateur.posDir, sabateur_desired_direction);
 
-    //TODO: end game if remainingPower <= 0
-    if (gameState.remainingPower <= 0) {
-        return EXIT_YES; // temporary FIX LATER
+    for (int i = 0; i < GENERATOR_COUNT; i++) {
+        struct Generator* gen = &gameState.generators[i];
+        if (gen->destroyed) continue;
+        float dx = gen->x - gameState.sabateur.posDir.x;
+        float dy = gen->y - gameState.sabateur.posDir.y;
+        if (dx * dx + dy * dy < SABO_RANGE * SABO_RANGE) {
+            gen->health -= 0.01f;
+            if (gen->health <= 0.0f) {
+                gen->destroyed = true;
+                gameState.remainingPower--;
+                gameState.flashframes = FLASH_DURATION;
+                CAMU_PlayShutterSound(SHUTTER_SOUND_TYPE_MOVIE_END);
+            }
+        }
+    }
+
+    if (gameState.remainingPower <= 0 && gameState.status == RUNNING) {
+        gameState.status = POWER_DEPLETED;
     }
 
     return EXIT_NO;
@@ -315,6 +344,7 @@ enum ShouldExit tick() {
 #define TRANS C2D_Color32(0x00, 0x00, 0x00, 0x00)
 #define YELLOW C2D_Color32(0xFF, 0xFF, 0x00, 0xFF)
 #define RED   C2D_Color32(0xFF, 0x00, 0x00, 0xFF)
+#define GREEN C2D_Color32(0x00, 0xFF, 0x00, 0xFF)
 #define GRAY  C2D_Color32(0x80, 0x80, 0x80, 0xFF)
 #define LIGHTESTGRAY C2D_Color32(0xF0, 0xF0, 0xF0, 0xFF)
 #define VERYLIGHTRED C2D_Color32(0xFF, 0xA0, 0xA0, 0xFF)
@@ -396,7 +426,7 @@ void draw_generators(bool show_health) {
     }
 }
 
-void draw_spotlight(float cx, float cy, float radius, bool top_screen) {
+void draw_spotlight(float cx, float cy, float radius, bool bottom_screen) {
     int segments = 128;
     float depth = layer_depth(LAYER_SPOTLIGHT);
 
@@ -405,7 +435,7 @@ void draw_spotlight(float cx, float cy, float radius, bool top_screen) {
     float in_radius = radius;
     float fade_radius = radius * 0.9f;
 
-    u32 colour = top_screen ? BLACK : TRANSPARENTISHBLACK;
+    u32 colour = bottom_screen ? TRANSPARENTISHBLACK : BLACK;
 
     for (int i = 0; i < segments; i++) {
         float theta1 = (float)i / segments * 2.0f * PI;
@@ -455,7 +485,7 @@ void draw_spotlight(float cx, float cy, float radius, bool top_screen) {
         );
 
         // 3. white gradient triangle from corner to fade radius
-        if (!top_screen) continue;
+        if (bottom_screen) continue;
         // skip if cross product is negative to avoid drawing over the spotlight
         float cross =  x2_in * y1_in - x1_in * y2_in;
         if (cross <= 0.0f) continue;
@@ -478,6 +508,22 @@ void draw_spotlight(float cx, float cy, float radius, bool top_screen) {
     }
 }
 
+void draw_power(float screen_width) {
+    float depth = layer_depth(LAYER_UI);
+    float bar_width = screen_width - 10.0f;
+    u32 bar_colour;
+    switch (gameState.remainingPower) {
+        case 1: bar_colour = RED; break;
+        case 2: bar_colour = YELLOW; break;
+        default: bar_colour = GREEN; break;
+    }
+    C2D_DrawRectSolid(3.0f, 3.0f, depth, bar_width + 4.0f, 14.0f, WHITE);
+    depth += 0.001f;
+    C2D_DrawRectSolid(5.0f, 5.0f, depth, bar_width, 10.0f, BLACK);
+    depth += 0.001f;
+    C2D_DrawRectSolid(5.0f, 5.0f, depth, bar_width * ((float)gameState.remainingPower / (float)GENERATOR_COUNT), 10.0f, bar_colour);
+}
+
 void draw_top() {
     C2D_TargetClear(gameState.top_target, WHITE);
     C2D_SceneBegin(gameState.top_target);
@@ -485,17 +531,19 @@ void draw_top() {
     C2D_ViewRotateDegrees(180);
     C2D_ViewTranslate(-TOP_WIDTH, -TOP_HEIGHT);
 
-    draw_civs(false);
+    draw_civs(gameState.status != RUNNING);
     draw_generators(false);
 
     draw_spotlight(
         spotlight_target_x(),
         spotlight_target_y(),
         spotlight_radius(),
-        true
+        gameState.status != RUNNING
     );
 
     if (gameState.flashframes > 0) C2D_TargetClear(gameState.top_target, BLACK);
+
+    draw_power(TOP_WIDTH);
 
     C2D_ViewReset();
 }
@@ -527,12 +575,15 @@ void draw_bottom() {
         spotlight_target_x(),
         spotlight_target_y(),
         spotlight_radius(),
-        false
+        true
     );
 
     if (gameState.flashframes > 0) C2D_TargetClear(gameState.bottom_target, BLACK);
 
     C2D_ViewReset();
+    
+    draw_power(BOTTOM_WIDTH);
+    // ^ after view reset because it's independent of the camera
 }
 
 typedef void (*defer_fn)(void);
@@ -575,6 +626,9 @@ int main(int argc, char *argv[]) {
     C2D_Init(C2D_DEFAULT_MAX_OBJECTS);
     C2D_Prepare();
     DEFER(C2D_Fini);
+
+    gameState.top_target = C2D_CreateScreenTarget(GFX_TOP, GFX_LEFT);
+    gameState.bottom_target = C2D_CreateScreenTarget(GFX_BOTTOM, GFX_LEFT);
 
     mcuHwcInit(); // needed to grab volume slider position
     DEFER(mcuHwcExit);
