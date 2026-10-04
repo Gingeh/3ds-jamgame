@@ -95,7 +95,7 @@ struct GameState {
 struct GameState gameState;
 
 float spotlight_radius() {
-    return gameState.remainingPower / (float)GENERATOR_COUNT * 50.0f + 30.0f;
+    return gameState.remainingPower / (float)GENERATOR_COUNT * 50.0f + 10.0f;
 }
 float spotlight_target_x() { return TOP_WIDTH * gameState.leftSlider; }
 float spotlight_target_y() { return TOP_HEIGHT * gameState.rightSlider; }
